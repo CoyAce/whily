@@ -25,9 +25,9 @@ type file struct {
 }
 
 type FileWriter struct {
-	FileId       chan uint32   // finished file id
-	Wrq          chan WriteReq // file request
-	FileData     chan Data     // file data
+	FileId       chan uint32   `json:"-"` // finished file id
+	Wrq          chan WriteReq `json:"-"` // file request
+	FileData     chan Data     `json:"-"` // file data
 	dataDir      string
 	fileMessages chan<- WriteReq  // notify file complete, receiver could refresh icon or update status
 	files        map[uint32]*file // internal file info
