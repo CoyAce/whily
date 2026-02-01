@@ -319,7 +319,7 @@ func Load(filePath string) *Client {
 }
 
 func (c *Client) Store() {
-	dir := c.getDir(c.FullID())
+	dir := c.DataDir + "/" + c.FullID() + "/"
 	Mkdir(dir)
 	filePath := dir + c.ConfigName
 	file, err := os.Create(filePath)
