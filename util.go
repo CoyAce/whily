@@ -298,6 +298,7 @@ func (cb *CircularBuffer) Clear() {
 }
 
 func Load(filePath string) *Client {
+	log.Printf("load config from file: %s", filePath)
 	_, err := os.Stat(filePath)
 	if os.IsNotExist(err) {
 		return nil
@@ -319,9 +320,10 @@ func Load(filePath string) *Client {
 }
 
 func (c *Client) Store() {
-	dir := c.DataDir + "/" + c.FullID() + "/"
+	dir := c.DataDir + "/"
 	Mkdir(dir)
 	filePath := dir + c.ConfigName
+	log.Printf("store config to file: %s", filePath)
 	file, err := os.Create(filePath)
 	if err != nil {
 		log.Printf("[%s] create file failed: %v", filePath, err)
