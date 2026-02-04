@@ -313,7 +313,7 @@ func (c *Client) sendImage(img image.Image, code OpCode, filename string) error 
 		return err
 	}
 
-	return c.sendFile(bytes.NewReader(buf.Bytes()), code, filename, 0, 0)
+	return c.SendFile(bytes.NewReader(buf.Bytes()), code, filename, 0, 0)
 }
 
 func (c *Client) SendGif(GIF *gif.GIF, filename string) error {
@@ -326,7 +326,7 @@ func (c *Client) sendGif(GIF *gif.GIF, code OpCode, filename string) error {
 	if err != nil {
 		return err
 	}
-	return c.sendFile(bytes.NewReader(buf.Bytes()), code, filename, 0, 0)
+	return c.SendFile(bytes.NewReader(buf.Bytes()), code, filename, 0, 0)
 }
 
 func (c *Client) SendVoice(filename string, duration uint64) error {
@@ -335,7 +335,7 @@ func (c *Client) SendVoice(filename string, duration uint64) error {
 		return err
 	}
 	defer r.Close()
-	return c.sendFile(r, OpSendVoice, filename, 0, duration)
+	return c.SendFile(r, OpSendVoice, filename, 0, duration)
 }
 
 func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) error {
@@ -387,7 +387,7 @@ func (c *Client) sendReq(code OpCode, fileId uint32) error {
 	return nil
 }
 
-func (c *Client) sendFile(reader io.Reader, code OpCode,
+func (c *Client) SendFile(reader io.Reader, code OpCode,
 	filename string, size uint64, duration uint64) error {
 	conn, err := net.Dial("udp", c.ServerAddr)
 	if err != nil {
