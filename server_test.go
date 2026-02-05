@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"net"
+	"reflect"
 	"testing"
 )
 
@@ -26,9 +27,9 @@ func TestMsgMarshal(t *testing.T) {
 
 func TestListenPacketUDP(t *testing.T) {
 	// init data
-	signAck := Ack{SrcOp: OpSign, Block: 0}
+	signAck := Ack{Block: 0}
 	signAckBytes, err := signAck.Marshal()
-	msgAck := Ack{SrcOp: OpSignedMSG, Block: 0}
+	msgAck := Ack{Block: 0}
 	msgAckBytes, err := msgAck.Marshal()
 
 	sign := "test"
@@ -101,6 +102,42 @@ func TestListenPacketUDP(t *testing.T) {
 	if !bytes.Equal(msgAckBytes, buf[:n]) {
 		t.Errorf("expected reply %q; actual reply %q", signAckBytes, buf[:n])
 	}
+}
+
+func TestPubSub(t *testing.T) {
+	serverAddr := setUpServer(t)
+	pub := newClient(serverAddr, "pub")
+	sub := newClient(serverAddr, "sub")
+	other := newClient(serverAddr, "other")
+	_ = pub.PublishFile("test.txt", 1, 1)
+	wrq := <-sub.FileMessages
+	if wrq.FileId != 1 {
+		t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
+	}
+	if wrq.Filename != "test.txt" {
+		t.Errorf("expected filename \"test.txt\"; actual filename %q", wrq.Filename)
+	}
+	q := <-other.FileMessages
+	if !reflect.DeepEqual(wrq, q) {
+		t.Errorf("expected file message %v; actual file message %v", wrq, q)
+	}
+	_ = sub.SubscribeFile(1, "pub")
+	rrq := <-pub.SubMessages
+	if rrq.FileId != 1 {
+		t.Errorf("expected file id 1; actual file id %d", rrq.FileId)
+	}
+	if rrq.Subscriber != "sub" {
+		t.Errorf("expected subscriber \"sub\"; actual subscriber %q", rrq.Subscriber)
+	}
+}
+
+func newClient(serverAddr string, UUID string) *Client {
+	client := Client{ServerAddr: serverAddr, Status: make(chan struct{}), UUID: UUID, Sign: "default"}
+	go func() {
+		client.ListenAndServe("127.0.0.1:")
+	}()
+	client.Ready()
+	return &client
 }
 
 func setUpClient(t *testing.T) (net.PacketConn, error) {
