@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"io"
+	"log"
 	"math/rand"
 	"net"
 	"os"
@@ -145,7 +146,11 @@ func TestPubSub(t *testing.T) {
 	if !reflect.DeepEqual(wrq, q) {
 		t.Errorf("expected file message %v; actual file message %v", wrq, q)
 	}
-	_ = sub.SubscribeFile(1, "pub")
+	_ = sub.SubscribeFile(1, "pub", func(p int) {
+		log.Printf("progress %d", p)
+	}, func(s int) {
+		log.Printf("speed %d", s)
+	})
 	rrq := <-pub.SubMessages
 	if rrq.FileId != 1 {
 		t.Errorf("expected file id 1; actual file id %d", rrq.FileId)

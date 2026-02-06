@@ -18,19 +18,29 @@ import (
 )
 
 type file struct {
-	req  WriteReq // file id, name and size
-	data []Data   // file packets
-	rt   *RangeTracker
+	req             WriteReq // file id, name and size
+	data            []Data   // file packets
+	packetsReceived int
+	startTime       time.Time
+	updateTime      time.Time
+	rt              *RangeTracker
+	*updater
+}
+
+type updater struct {
+	updateProgress func(p int) // progress updater
+	updateSpeed    func(s int) // speed updater
 }
 
 type fileWriter struct {
-	fileId       chan uint32      // finished file id
-	wrq          chan WriteReq    // file request
-	fileData     chan Data        // file data
-	dataDir      string           // files save in dataDir
-	fileMessages chan<- WriteReq  // notify file complete, receiver could refresh icon or update status
-	files        map[uint32]*file // internal file info
-	nck          func(f file)     // request lost packet
+	fileId       chan uint32         // finished file id
+	wrq          chan WriteReq       // file request
+	fileData     chan Data           // file data
+	dataDir      string              // files save in dataDir
+	fileMessages chan<- WriteReq     // notify file complete, receiver could refresh icon or update status
+	files        map[uint32]*file    // internal file info
+	updaters     map[uint32]*updater // metrics updater
+	nck          func(f file)        // request lost packet
 }
 
 func (f *fileWriter) loop() {
@@ -56,10 +66,39 @@ func (f *fileWriter) tryWrite(data Data) {
 	fd.data = append(fd.data, data)
 	if f.received100kb(fd) {
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
+		fd.updateMetrics()
 		if !f.isPull(data.FileId) {
 			f.tryNck(*fd)
 		}
 	}
+}
+
+func (f *file) updateMetrics() {
+	if f.updater == nil {
+		return
+	}
+	f.packetsReceived++
+	f.updateSpeed(f.getSpeed())
+	f.updateTime = time.Now()
+	f.packetsReceived = 0
+	f.updateProgress(f.rt.GetProgress())
+}
+
+func (f *file) getSpeed() int {
+	var (
+		elapsed         time.Duration
+		packetsReceived int
+		speed           float32
+	)
+	if f.rt.isCompleted() {
+		elapsed = time.Since(f.startTime) / time.Millisecond
+		packetsReceived = int(f.rt.nextBlock() - 1)
+	} else {
+		elapsed = time.Since(f.updateTime) / time.Millisecond
+		packetsReceived = f.packetsReceived
+	}
+	speed = float32(packetsReceived*BlockSize) * 1000 / float32(elapsed)
+	return int(speed)
 }
 
 func (f *fileWriter) tryNck(fd file) {
@@ -79,7 +118,13 @@ func (f *fileWriter) init(req WriteReq) {
 	}
 	// remove before append
 	RemoveFile(f.getPath(req.UUID, req.Filename))
-	f.files[req.FileId] = &file{req: req, rt: &RangeTracker{}}
+	f.files[req.FileId] = &file{
+		req:        req,
+		rt:         &RangeTracker{},
+		startTime:  time.Now(),
+		updateTime: time.Now(),
+		updater:    f.updaters[req.FileId],
+	}
 	if f.isPull(req.FileId) {
 		f.pull(req)
 	}
@@ -121,6 +166,7 @@ func (f *fileWriter) tryComplete(id uint32) {
 	filePath := f.getPath(req.UUID, req.Filename)
 	f.flush(fd, filePath)
 	if fd.rt.isCompleted() {
+		fd.updateMetrics()
 		f.clean(id)
 		f.fileMessages <- req
 	} else {
@@ -362,6 +408,7 @@ func newFileMetaInfo(
 			dataDir:      dataDir,
 			fileMessages: fileMessages,
 			files:        make(map[uint32]*file),
+			updaters:     make(map[uint32]*updater),
 			nck:          nck,
 		},
 		fileCache: make(map[uint32]*CircularBuffer),
@@ -580,7 +627,8 @@ func (c *Client) PublishContent(name string, size uint64, id uint32, content io.
 	return c.send(&WriteReq{Code: OpContent, FileId: id, Filename: name, Size: size, UUID: c.FullID()})
 }
 
-func (c *Client) SubscribeFile(id uint32, sender string) error {
+func (c *Client) SubscribeFile(id uint32, sender string, updateProgress func(p int), updateSpeed func(s int)) error {
+	c.updaters[id] = &updater{updateProgress: updateProgress, updateSpeed: updateSpeed}
 	return c.send(&ReadReq{Code: OpSubscribe, FileId: id, Publisher: sender, Subscriber: c.FullID()})
 }
 

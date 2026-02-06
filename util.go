@@ -174,6 +174,14 @@ type RangeTracker struct {
 	ranges      []Range
 }
 
+func (r *RangeTracker) GetProgress() int {
+	cnt := uint32(0)
+	for _, rng := range r.ranges {
+		cnt += rng.end - rng.start + 1
+	}
+	return 100 - int(float32(cnt)/float32(r.latestBlock-1)*100)
+}
+
 func (r *RangeTracker) Set(ranges []Range) {
 	r.latestBlock = ranges[len(ranges)-1].end + 1
 	r.ranges = ranges
