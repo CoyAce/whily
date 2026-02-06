@@ -97,7 +97,7 @@ func TestListenPacketUDP(t *testing.T) {
 	// send ack
 	client.WriteTo(msgAckBytes, sAddr)
 
-	// client send text, server should ack
+	// client send text, server should reply ack
 	_, err = client.WriteTo(clientMsgPkt, sAddr)
 	if err != nil {
 		t.Fatal(err)

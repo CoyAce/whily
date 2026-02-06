@@ -75,13 +75,13 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		}
 		s.handleFileData(conn, data, pkt, addr, n)
 	case sign.Unmarshal(pkt) == nil:
+		s.ack(conn, addr, 0)
 		s.removeByUUID(sign.UUID)
 		s.uuidMap.Store(sign.UUID, addr.String())
 		s.addrMap.Store(addr.String(), sign)
-		s.ack(conn, addr, 0)
 		log.Printf("[%s] set sign: [%s]", addr.String(), sign)
 	case wrq.Unmarshal(pkt) == nil:
-		go s.handle(s.findSignByUUID(wrq.UUID), pkt)
+		s.ack(conn, addr, 0)
 		audioId := s.decodeAudioId(wrq.FileId)
 		switch wrq.Code {
 		case OpAudioCall:
@@ -96,22 +96,36 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 			}
 		case OpPublish:
 			s.pubMap.Store(FilePair{FileId: wrq.FileId, UUID: wrq.UUID}, &sync.Map{})
+		case OpContent:
+			s.dispatchToSubscribers(wrq, pkt)
+			return
 		default:
 			s.addFile(wrq)
 		}
-		s.ack(conn, addr, 0)
+		go s.handle(s.findSignByUUID(wrq.UUID), pkt)
 	case rrq.Unmarshal(pkt) == nil:
+		s.ack(conn, addr, 0)
 		switch rrq.Code {
 		case OpSubscribe:
-			go s.handleSub(conn, pkt, rrq)
+			go s.dispatchToPublisher(pkt, rrq)
 		case OpUnsubscribe:
 			go s.deleteSub(rrq)
 		default:
 		}
-		s.ack(conn, addr, 0)
 	case nck.Unmarshal(pkt) == nil:
 		go s.handleNck(conn, pkt, nck)
 	}
+}
+
+func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
+	subs, ok := s.pubMap.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
+	if !ok {
+		return
+	}
+	subs.(*sync.Map).Range(func(k, v interface{}) bool {
+		go s.connectAndDispatch(k.(string), pkt)
+		return true
+	})
 }
 
 func (s *Server) reject(conn net.PacketConn, addr net.Addr) {
@@ -120,15 +134,11 @@ func (s *Server) reject(conn net.PacketConn, addr net.Addr) {
 	_, _ = conn.WriteTo(p, addr)
 }
 
-func (s *Server) handleSub(conn net.PacketConn, pkt []byte, rrq ReadReq) {
+func (s *Server) dispatchToPublisher(pkt []byte, rrq ReadReq) {
 	pair := FilePair{FileId: rrq.FileId, UUID: rrq.Publisher}
 	subs, ok := s.pubMap.Load(pair)
 	if ok {
-		_, target := s.findTarget(rrq.Publisher)
-		_, err := conn.WriteTo(pkt, target)
-		if err != nil {
-			log.Printf("Send rrq to [%s} failed: %v", rrq.Publisher, err)
-		}
+		s.connectAndDispatch(s.findAddrByUUID(rrq.Publisher), pkt)
 		subs.(*sync.Map).Store(rrq.Subscriber, rrq)
 	}
 }

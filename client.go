@@ -18,30 +18,30 @@ import (
 )
 
 type file struct {
-	req  WriteReq
-	data []Data
+	req  WriteReq // file id, name and size
+	data []Data   // file packets
 	rt   *RangeTracker
 }
 
-type FileWriter struct {
-	FileId       chan uint32   `json:"-"` // finished file id
-	Wrq          chan WriteReq `json:"-"` // file request
-	FileData     chan Data     `json:"-"` // file data
-	dataDir      string
+type fileWriter struct {
+	fileId       chan uint32      // finished file id
+	wrq          chan WriteReq    // file request
+	fileData     chan Data        // file data
+	dataDir      string           // files save in dataDir
 	fileMessages chan<- WriteReq  // notify file complete, receiver could refresh icon or update status
 	files        map[uint32]*file // internal file info
 	nck          func(f file)     // request lost packet
 }
 
-func (f *FileWriter) Loop() {
+func (f *fileWriter) Loop() {
 	for {
 		select {
 		// last block received, complete file transfer
-		case id := <-f.FileId:
+		case id := <-f.fileId:
 			f.tryComplete(id)
-		case req := <-f.Wrq:
+		case req := <-f.wrq:
 			f.init(req)
-		case data := <-f.FileData:
+		case data := <-f.fileData:
 			if !f.isFile(data.FileId) {
 				continue
 			}
@@ -50,7 +50,7 @@ func (f *FileWriter) Loop() {
 	}
 }
 
-func (f *FileWriter) tryWrite(data Data) {
+func (f *fileWriter) tryWrite(data Data) {
 	fd := f.files[data.FileId]
 	req := fd.req
 	fd.data = append(fd.data, data)
@@ -63,39 +63,39 @@ func (f *FileWriter) tryWrite(data Data) {
 	}
 }
 
-func (f *FileWriter) tryNck(fd file) {
+func (f *fileWriter) tryNck(fd file) {
 	if fd.rt.isCompleted() {
 		return
 	}
 	f.nck(fd)
 }
 
-func (f *FileWriter) receivedNckRequestedPackets(data Data, fd file) bool {
+func (f *fileWriter) receivedNckRequestedPackets(data Data, fd file) bool {
 	return data.Block < fd.rt.nextBlock()
 }
 
-func (f *FileWriter) received100kb(fd *file) bool {
+func (f *fileWriter) received100kb(fd *file) bool {
 	return len(fd.data) >= 100*1024/BlockSize
 }
 
-func (f *FileWriter) init(req WriteReq) {
+func (f *fileWriter) init(req WriteReq) {
 	f.files[req.FileId] = &file{req: req, rt: &RangeTracker{}}
 	// remove before append
 	RemoveFile(f.getPath(req.UUID, req.Filename))
 }
 
-func (f *FileWriter) getDir(uuid string) string {
+func (f *fileWriter) getDir(uuid string) string {
 	if uuid == "" {
 		return f.dataDir + "/default"
 	}
 	return f.dataDir + "/" + strings.Replace(uuid, "#", "_", -1)
 }
 
-func (f *FileWriter) getPath(uuid string, filename string) string {
+func (f *fileWriter) getPath(uuid string, filename string) string {
 	return f.getDir(uuid) + "/" + filename
 }
 
-func (f *FileWriter) tryComplete(id uint32) {
+func (f *fileWriter) tryComplete(id uint32) {
 	fd := f.files[id]
 	if fd == nil {
 		return
@@ -112,13 +112,13 @@ func (f *FileWriter) tryComplete(id uint32) {
 	}
 }
 
-func (f *FileWriter) tryCompleteIn1Second(id uint32) {
+func (f *fileWriter) tryCompleteIn1Second(id uint32) {
 	time.AfterFunc(1*time.Second, func() {
 		f.tryComplete(id)
 	})
 }
 
-func (f *FileWriter) flush(fd *file, filePath string) {
+func (f *fileWriter) flush(fd *file, filePath string) {
 	d := fd.data
 	r := Range{}
 	for d != nil {
@@ -128,11 +128,11 @@ func (f *FileWriter) flush(fd *file, filePath string) {
 	fd.data = fd.data[:0]
 }
 
-func (f *FileWriter) clean(id uint32) {
+func (f *fileWriter) clean(id uint32) {
 	delete(f.files, id)
 }
 
-func (f *FileWriter) isFile(fileId uint32) bool {
+func (f *fileWriter) isFile(fileId uint32) bool {
 	fd := f.files[fileId]
 	return fd != nil && fd.req.FileId == fileId
 }
@@ -160,6 +160,16 @@ func writeTo(filePath string, data []Data) {
 	if _, err := io.Copy(file, multiReader); err != nil {
 		log.Printf("error writing to file: %v", err)
 	}
+}
+
+type fileContent struct {
+	fileId  uint32
+	content io.ReadSeekCloser
+	rt      RangeTracker
+}
+
+type fileReader struct {
+	contents map[uint32]*fileContent // fileId -> *fileContent
 }
 
 type Client struct {
@@ -203,7 +213,8 @@ type connManager struct {
 }
 
 type fileManager struct {
-	*FileWriter
+	*fileWriter
+	*fileReader
 	fileCache map[uint32]*CircularBuffer
 	lock      sync.Mutex
 }
@@ -230,10 +241,11 @@ func (f *fileManager) loadCache(id uint32) *CircularBuffer {
 
 func newFileMetaInfo(dataDir string, nck func(f file), fileMessages chan<- WriteReq) fileManager {
 	return fileManager{
-		FileWriter: &FileWriter{
-			Wrq:          make(chan WriteReq),
-			FileData:     make(chan Data),
-			FileId:       make(chan uint32),
+		fileReader: &fileReader{contents: make(map[uint32]*fileContent)},
+		fileWriter: &fileWriter{
+			wrq:          make(chan WriteReq),
+			fileData:     make(chan Data),
+			fileId:       make(chan uint32),
 			dataDir:      dataDir,
 			fileMessages: fileMessages,
 			files:        make(map[uint32]*file),
@@ -447,6 +459,13 @@ func (c *Client) send(wrq Req) error {
 
 func (c *Client) PublishFile(name string, size uint64, id uint32) error {
 	return c.send(&WriteReq{Code: OpPublish, FileId: id, Filename: name, Size: size, UUID: c.FullID()})
+}
+
+func (c *Client) PublishContent(name string, size uint64, id uint32, content io.ReadSeekCloser) error {
+	if c.contents[id] == nil {
+		c.contents[id] = &fileContent{fileId: id, content: content}
+	}
+	return c.send(&WriteReq{Code: OpContent, FileId: id, Filename: name, Size: size, UUID: c.FullID()})
 }
 
 func (c *Client) SubscribeFile(id uint32, sender string) error {
@@ -669,6 +688,9 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 			}
 		case OpPublish:
 			c.FileMessages <- wrq
+		case OpContent:
+			// content ready
+			c.addFile(wrq)
 		default:
 			c.addFile(wrq)
 		}
@@ -697,16 +719,16 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 }
 
 func (c *Client) handleFileData(conn net.PacketConn, addr net.Addr, data Data, n int) {
-	c.FileData <- data
+	c.fileData <- data
 	if n < DatagramSize {
 		c.ack(conn, addr, data.Block)
-		c.FileId <- data.FileId
+		c.fileId <- data.FileId
 		log.Printf("file id: [%d] received", data.FileId)
 	}
 }
 
 func (c *Client) addFile(wrq WriteReq) {
-	c.Wrq <- wrq
+	c.wrq <- wrq
 }
 
 func (c *Client) ack(conn net.PacketConn, addr net.Addr, block uint32) {
