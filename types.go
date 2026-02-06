@@ -546,6 +546,10 @@ type Range struct {
 	start, end uint32
 }
 
+func MonoRange(v uint32) Range {
+	return Range{start: v, end: v}
+}
+
 func (r *Range) Marshal() []byte {
 	b := new(bytes.Buffer)
 	b.Grow(8)

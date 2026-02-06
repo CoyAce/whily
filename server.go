@@ -65,12 +65,16 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 			s.reject(conn, addr)
 			return
 		}
-		go s.handle(msg.Sign, pkt)
-		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
 		s.ack(conn, addr, 0)
+		s.handle(msg.Sign, pkt)
+		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
 	case data.Unmarshal(pkt) == nil:
 		if s.isAudio(data.FileId) {
-			go s.handleStreamData(conn, data, pkt, addr)
+			s.handleStreamData(conn, data, pkt, addr)
+			return
+		}
+		if w, ok := s.isContent(data.FileId); ok {
+			s.dispatchToSubscribers(*w, pkt)
 			return
 		}
 		s.handleFileData(conn, data, pkt, addr, n)
@@ -97,24 +101,34 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		case OpPublish:
 			s.pubMap.Store(FilePair{FileId: wrq.FileId, UUID: wrq.UUID}, &sync.Map{})
 		case OpContent:
+			s.addFile(wrq)
 			s.dispatchToSubscribers(wrq, pkt)
 			return
 		default:
 			s.addFile(wrq)
 		}
-		go s.handle(s.findSignByUUID(wrq.UUID), pkt)
+		s.handle(s.findSignByUUID(wrq.UUID), pkt)
 	case rrq.Unmarshal(pkt) == nil:
 		s.ack(conn, addr, 0)
 		switch rrq.Code {
 		case OpSubscribe:
-			go s.dispatchToPublisher(pkt, rrq)
+			s.dispatchToPublisher(pkt, rrq)
 		case OpUnsubscribe:
-			go s.deleteSub(rrq)
+			s.deleteSub(rrq)
 		default:
 		}
 	case nck.Unmarshal(pkt) == nil:
-		go s.handleNck(conn, pkt, nck)
+		s.handleNck(conn, pkt, nck)
 	}
+}
+
+func (s *Server) isContent(fileId uint32) (*WriteReq, bool) {
+	wrq, ok := s.fileMap.Load(fileId)
+	if !ok {
+		return nil, false
+	}
+	w := wrq.(WriteReq)
+	return &w, w.Code == OpContent
 }
 
 func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
@@ -128,17 +142,11 @@ func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
 	})
 }
 
-func (s *Server) reject(conn net.PacketConn, addr net.Addr) {
-	err := ErrUnknownUser
-	p, _ := err.Marshal()
-	_, _ = conn.WriteTo(p, addr)
-}
-
 func (s *Server) dispatchToPublisher(pkt []byte, rrq ReadReq) {
 	pair := FilePair{FileId: rrq.FileId, UUID: rrq.Publisher}
 	subs, ok := s.pubMap.Load(pair)
 	if ok {
-		s.connectAndDispatch(s.findAddrByUUID(rrq.Publisher), pkt)
+		go s.connectAndDispatch(s.findAddrByUUID(rrq.Publisher), pkt)
 		subs.(*sync.Map).Store(rrq.Subscriber, rrq)
 	}
 }
@@ -151,12 +159,18 @@ func (s *Server) deleteSub(rrq ReadReq) {
 	subs.(*sync.Map).Delete(rrq.Subscriber)
 }
 
+func (s *Server) reject(conn net.PacketConn, addr net.Addr) {
+	err := ErrUnknownUser
+	p, _ := err.Marshal()
+	_, _ = conn.WriteTo(p, addr)
+}
+
 func (s *Server) handleNck(conn net.PacketConn, pkt []byte, nck Nck) {
 	sign := s.findSignByFileId(nck.FileId)
 	target, addr := s.findTarget(sign.UUID)
 	_, err := conn.WriteTo(pkt, addr)
 	if err != nil {
-		log.Printf("Send ack to [%s] failed: %v", target, err)
+		log.Printf("Send nck to [%s] failed: %v", target, err)
 	}
 }
 
@@ -207,12 +221,12 @@ func (s *Server) handleFileData(conn net.PacketConn, data Data, pkt []byte, send
 	isLastPacket := n < DatagramSize
 	sign := s.findSignByFileId(data.FileId)
 	if isLastPacket {
-		go s.handle(sign, pkt)
+		s.handle(sign, pkt)
 		time.AfterFunc(5*time.Minute, func() {
 			s.fileMap.Delete(data.FileId)
 		})
 	} else {
-		go s.directRelay(conn, sign, pkt)
+		s.directRelay(conn, sign, pkt)
 	}
 	s.ack(conn, sender, data.Block)
 }
@@ -220,7 +234,6 @@ func (s *Server) handleFileData(conn net.PacketConn, data Data, pkt []byte, send
 func (s *Server) directRelay(conn net.PacketConn, sign Sign, pkt []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		if value.(Sign).Sign == sign.Sign && value.(Sign).UUID != sign.UUID {
-			// use goroutine to avoid blocking by slow connection
 			go func() {
 				udpAddr, _ := net.ResolveUDPAddr("udp", key.(string))
 				_, _ = conn.WriteTo(pkt, udpAddr)
@@ -300,6 +313,7 @@ func (s *Server) checkUser(sign Sign) bool {
 	return ok
 }
 
+// connectAndDispatch may block by slow connection
 func (s *Server) connectAndDispatch(addr string, bytes []byte) {
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
 	conn, err := net.Dial("udp", addr)

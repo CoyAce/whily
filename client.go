@@ -79,9 +79,30 @@ func (f *fileWriter) received100kb(fd *file) bool {
 }
 
 func (f *fileWriter) init(req WriteReq) {
-	f.files[req.FileId] = &file{req: req, rt: &RangeTracker{}}
+	if f.isProcessing(req) {
+		return
+	}
 	// remove before append
 	RemoveFile(f.getPath(req.UUID, req.Filename))
+	f.files[req.FileId] = &file{req: req, rt: &RangeTracker{}}
+	if f.needPull(req) {
+		f.pull(req)
+	}
+}
+
+func (f *fileWriter) pull(req WriteReq) {
+	finalBlock := (req.Size + BlockSize - 1) / BlockSize
+	fd := f.files[req.FileId]
+	fd.rt.Add(MonoRange(uint32(finalBlock + 1)))
+	f.nck(*fd)
+}
+
+func (f *fileWriter) needPull(req WriteReq) bool {
+	return req.Code == OpContent
+}
+
+func (f *fileWriter) isProcessing(req WriteReq) bool {
+	return f.files[req.FileId] != nil
 }
 
 func (f *fileWriter) getDir(uuid string) string {
@@ -170,6 +191,10 @@ type fileContent struct {
 
 type fileReader struct {
 	contents map[uint32]*fileContent // fileId -> *fileContent
+}
+
+func (f *fileReader) isPull(fileId uint32) bool {
+	return f.contents[fileId] != nil
 }
 
 type Client struct {
@@ -703,6 +728,9 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 			c.handleFileData(conn, addr, data, len(buf))
 		}
 	case nck.Unmarshal(buf) == nil:
+		if c.isPull(nck.FileId) {
+			return
+		}
 		cb := c.loadCache(nck.FileId)
 		if cb == nil {
 			return

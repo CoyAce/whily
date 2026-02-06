@@ -77,7 +77,7 @@ func TestListenPacketUDP(t *testing.T) {
 		t.Errorf("expected reply %q; actual reply %q", signAckBytes, buf[:n])
 	}
 
-	// clientA send text
+	// clientA send text "beautiful world"
 	clientA := Client{ServerAddr: serverAddr, Status: make(chan struct{}), UUID: uuidA, Sign: sign}
 	go func() {
 		clientA.ListenAndServe("127.0.0.1:")
@@ -103,6 +103,7 @@ func TestListenPacketUDP(t *testing.T) {
 		t.Fatal(err)
 	}
 	// read ack
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
 	n, _, err = client.ReadFrom(buf)
 	if !bytes.Equal(msgAckBytes, buf[:n]) {
 		t.Errorf("expected reply %q; actual reply %q", signAckBytes, buf[:n])
