@@ -33,7 +33,7 @@ type fileWriter struct {
 	nck          func(f file)     // request lost packet
 }
 
-func (f *fileWriter) Loop() {
+func (f *fileWriter) loop() {
 	for {
 		select {
 		// last block received, complete file transfer
@@ -56,10 +56,9 @@ func (f *fileWriter) tryWrite(data Data) {
 	fd.data = append(fd.data, data)
 	if f.received100kb(fd) {
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
-		f.tryNck(*fd)
-	}
-	if f.receivedNckRequestedPackets(data, *fd) {
-		f.flush(fd, f.getPath(req.UUID, req.Filename))
+		if !f.isPull(data.FileId) {
+			f.tryNck(*fd)
+		}
 	}
 }
 
@@ -68,10 +67,6 @@ func (f *fileWriter) tryNck(fd file) {
 		return
 	}
 	f.nck(fd)
-}
-
-func (f *fileWriter) receivedNckRequestedPackets(data Data, fd file) bool {
-	return data.Block < fd.rt.nextBlock()
 }
 
 func (f *fileWriter) received100kb(fd *file) bool {
@@ -85,7 +80,7 @@ func (f *fileWriter) init(req WriteReq) {
 	// remove before append
 	RemoveFile(f.getPath(req.UUID, req.Filename))
 	f.files[req.FileId] = &file{req: req, rt: &RangeTracker{}}
-	if f.needPull(req) {
+	if f.isPull(req.FileId) {
 		f.pull(req)
 	}
 }
@@ -97,8 +92,9 @@ func (f *fileWriter) pull(req WriteReq) {
 	f.nck(*fd)
 }
 
-func (f *fileWriter) needPull(req WriteReq) bool {
-	return req.Code == OpContent
+func (f *fileWriter) isPull(fileId uint32) bool {
+	fd := f.files[fileId]
+	return fd != nil && fd.req.Code == OpContent
 }
 
 func (f *fileWriter) isProcessing(req WriteReq) bool {
@@ -190,7 +186,26 @@ type fileContent struct {
 }
 
 type fileReader struct {
+	nck      chan Nck                // packets request
 	contents map[uint32]*fileContent // fileId -> *fileContent
+	send     func(data Data) error   // send one data packet
+}
+
+func (f *fileReader) process() {
+	for {
+		select {
+		case n := <-f.nck:
+			go f.read(n)
+		}
+	}
+}
+
+func (f *fileReader) read(n Nck) {
+	content := f.contents[n.FileId]
+	if content == nil {
+		return
+	}
+
 }
 
 func (f *fileReader) isPull(fileId uint32) bool {
@@ -264,9 +279,18 @@ func (f *fileManager) loadCache(id uint32) *CircularBuffer {
 	return f.fileCache[id]
 }
 
-func newFileMetaInfo(dataDir string, nck func(f file), fileMessages chan<- WriteReq) fileManager {
+func newFileMetaInfo(
+	dataDir string,
+	nck func(f file),
+	send func(d Data) error,
+	fileMessages chan<- WriteReq,
+) fileManager {
 	return fileManager{
-		fileReader: &fileReader{contents: make(map[uint32]*fileContent)},
+		fileReader: &fileReader{
+			nck:      make(chan Nck),
+			send:     send,
+			contents: make(map[uint32]*fileContent),
+		},
 		fileWriter: &fileWriter{
 			wrq:          make(chan WriteReq),
 			fileData:     make(chan Data),
@@ -474,8 +498,7 @@ func (c *Client) send(wrq Req) error {
 	if err != nil {
 		return err
 	}
-	pktBuf := make([]byte, DatagramSize)
-	_, err = c.sendPacket(conn, pktBuf, pkt, 0)
+	_, err = c.sendPacket(conn, pkt, 0)
 	if err != nil {
 		return err
 	}
@@ -512,39 +535,37 @@ func (c *Client) SendFile(reader io.Reader, code OpCode,
 	hash := Hash(unsafe.Pointer(&reader))
 	log.Printf("file id: %v", hash)
 
-	pktBuf := make([]byte, DatagramSize)
-
 	wrq := WriteReq{Code: code, FileId: hash, UUID: c.FullID(),
 		Filename: filename, Size: size, Duration: duration}
 	pkt, err := wrq.Marshal()
 	if err != nil {
 		return err
 	}
-	_, err = c.sendPacket(conn, pktBuf, pkt, 0)
+	_, err = c.sendPacket(conn, pkt, 0)
 	if err != nil {
 		return err
 	}
 	c.initCache(wrq.FileId)
 
 	data := Data{FileId: wrq.FileId, Payload: reader}
-	err = c.sendData(conn, pktBuf, data)
+	err = c.sendData(conn, data)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (c *Client) sendData(conn net.Conn, readBuf []byte, data Data) error {
+func (c *Client) sendData(conn net.Conn, data Data) error {
 	cb := c.loadCache(data.FileId)
 	for n := DatagramSize; n == DatagramSize; {
 		pkt, err := data.Marshal()
 		if err != nil {
-			log.Printf("[%s] marshal failed: %v", "icon", err)
+			return err
 		}
 		cb.Write(Packet{Block: data.Block, Data: pkt})
 		isLastPacket := len(pkt) == DatagramSize
 		if isLastPacket {
-			n, err = c.sendPacket(conn, readBuf, pkt, data.Block)
+			n, err = c.sendPacket(conn, pkt, data.Block)
 		} else {
 			n, err = c.conn.WriteTo(pkt, c.SAddr)
 		}
@@ -553,6 +574,18 @@ func (c *Client) sendData(conn net.Conn, readBuf []byte, data Data) error {
 		}
 	}
 	c.cleanCacheIn5Min(data.FileId)
+	return nil
+}
+
+func (c *Client) writeOnce(data Data) error {
+	pkt, err := data.Marshal()
+	if err != nil {
+		return err
+	}
+	_, err = c.conn.WriteTo(pkt, c.SAddr)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -570,8 +603,7 @@ func (c *Client) SendText(text string) error {
 	}
 
 	c.MessageCounter++
-	buf := make([]byte, DatagramSize)
-	_, err = c.sendPacket(conn, buf, pkt, 0)
+	_, err = c.sendPacket(conn, pkt, 0)
 	return err
 }
 
@@ -590,7 +622,8 @@ func (c *Client) ListenAndServe(addr string) {
 	// init
 	c.init()
 
-	go c.Loop()
+	go c.loop()
+	go c.process()
 
 	c.SAddr, err = net.ResolveUDPAddr("udp", c.ServerAddr)
 	go func() {
@@ -621,7 +654,7 @@ func (c *Client) ListenAndServe(addr string) {
 func (c *Client) init() {
 	c.messages = newMessages()
 	c.audioManager = newAudioMetaInfo()
-	c.fileManager = newFileMetaInfo(c.DataDir, c.nck, c.FileMessages)
+	c.fileManager = newFileMetaInfo(c.DataDir, c.nck, c.writeOnce, c.FileMessages)
 	Mkdir(c.getDir(c.FullID()))
 }
 
@@ -728,7 +761,7 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 			c.handleFileData(conn, addr, data, len(buf))
 		}
 	case nck.Unmarshal(buf) == nil:
-		if c.isPull(nck.FileId) {
+		if c.fileReader.isPull(nck.FileId) {
 			return
 		}
 		cb := c.loadCache(nck.FileId)
@@ -791,8 +824,11 @@ func (c *Client) SetServerAddr(addr string) {
 	c.SAddr, _ = net.ResolveUDPAddr("udp", addr)
 }
 
-func (c *Client) sendPacket(conn net.Conn, buf []byte, bytes []byte, block uint32) (int, error) {
-	var ackPkt Ack
+func (c *Client) sendPacket(conn net.Conn, bytes []byte, block uint32) (int, error) {
+	var (
+		ackPkt Ack
+		buf    = make([]byte, DatagramSize)
+	)
 RETRY:
 	for i := c.Retries; i > 0; i-- {
 		n, err := conn.Write(bytes)
