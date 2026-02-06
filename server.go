@@ -13,10 +13,10 @@ type Server struct {
 	Retries uint8         // the number of times to retry a failed transmission
 	Timeout time.Duration // the duration to wait for an acknowledgement
 	fileMap sync.Map      // fileId -> wrq
-	pubMap  sync.Map      // published files, FilePair -> *sync.Map
+	pubMap  sync.Map      // published files, FilePair -> *sync.Map { subscriber -> ReadReq }
 	addrMap sync.Map      // addr -> sign
 	uuidMap sync.Map      // uuid -> addr
-	audioManager
+	*audioManager
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -127,7 +127,7 @@ func (s *Server) handleSub(conn net.PacketConn, pkt []byte, rrq ReadReq) {
 		if err != nil {
 			log.Printf("Send rrq to [%s} failed: %v", rrq.Publisher, err)
 		}
-		subs.(*sync.Map).Store(rrq, true)
+		subs.(*sync.Map).Store(rrq.Subscriber, rrq)
 	}
 }
 
@@ -136,8 +136,7 @@ func (s *Server) deleteSub(rrq ReadReq) {
 	if !ok {
 		return
 	}
-	rrq.Code = OpSubscribe
-	subs.(*sync.Map).Delete(rrq)
+	subs.(*sync.Map).Delete(rrq.Subscriber)
 }
 
 func (s *Server) handleNck(conn net.PacketConn, pkt []byte, nck Nck) {
@@ -177,15 +176,19 @@ func (s *Server) handleStreamData(conn net.PacketConn, data Data, pkt []byte, se
 		return
 	}
 	UUID := senderSign.(Sign).UUID
-	receivers := s.audioReceiver[s.decodeAudioId(data.FileId)]
-	for _, wrq := range receivers {
-		if wrq.UUID != UUID {
+	receivers, ok := s.audioReceiver.Load(s.decodeAudioId(data.FileId))
+	if !ok {
+		return
+	}
+	receivers.(*sync.Map).Range(func(key, value interface{}) bool {
+		if key != UUID {
 			go func() {
-				_, addr := s.findTarget(wrq.UUID)
+				_, addr := s.findTarget(key.(string))
 				_, _ = conn.WriteTo(pkt, addr)
 			}()
 		}
-	}
+		return true
+	})
 }
 
 func (s *Server) handleFileData(conn net.PacketConn, data Data, pkt []byte, sender net.Addr, n int) {
@@ -220,9 +223,6 @@ func (s *Server) addFile(wrq WriteReq) {
 }
 
 func (s *Server) init() {
-	s.audioMap = make(map[uint16]WriteReq)
-	s.audioReceiver = make(map[uint16][]WriteReq)
-
 	if s.Retries == 0 {
 		s.Retries = 3
 	}
@@ -230,6 +230,8 @@ func (s *Server) init() {
 	if s.Timeout == 0 {
 		s.Timeout = 6 * time.Second
 	}
+
+	s.audioManager = &audioManager{}
 }
 
 func (s *Server) findSignByUUID(uuid string) Sign {

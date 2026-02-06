@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -175,7 +174,7 @@ type Client struct {
 	messages
 	connManager
 	fileManager
-	audioManager
+	*audioManager
 }
 
 type messages struct {
@@ -245,27 +244,36 @@ func newFileMetaInfo(dataDir string, nck func(f file), fileMessages chan<- Write
 }
 
 type audioManager struct {
-	audioMap      map[uint16]WriteReq
-	audioReceiver map[uint16][]WriteReq
+	audioMap      sync.Map  // audio maker
+	audioReceiver sync.Map  // audio receiver, fileId -> *sync.Map { UUID -> WriteReq }
 	AudioData     chan Data `json:"-"`
-	lock          sync.Mutex
 }
 
-func newAudioMetaInfo() audioManager {
-	return audioManager{
-		audioMap:      make(map[uint16]WriteReq),
-		audioReceiver: make(map[uint16][]WriteReq),
-		AudioData:     make(chan Data, 100),
+func newAudioMetaInfo() *audioManager {
+	return &audioManager{
+		AudioData: make(chan Data, 100),
 	}
 }
 
 func (a *audioManager) addAudioStream(wrq WriteReq) {
-	a.audioMap[GetHigh16(wrq.FileId)] = wrq
+	a.audioMap.Store(a.decodeAudioId(wrq.FileId), wrq)
 }
 
 func (a *audioManager) isAudio(fileId uint32) bool {
 	audioId := a.decodeAudioId(fileId)
-	return a.decodeAudioId(a.audioMap[audioId].FileId) == audioId
+	wrq, ok := a.audioMap.Load(audioId)
+	if !ok {
+		return false
+	}
+	return a.decodeAudioId(wrq.(WriteReq).FileId) == audioId
+}
+
+func (a *audioManager) isAudioMaker(fileId uint16, UUID string) bool {
+	wrq, ok := a.audioMap.Load(fileId)
+	if !ok {
+		return false
+	}
+	return wrq.(WriteReq).UUID == UUID
 }
 
 func (a *audioManager) decodeAudioId(fileId uint32) uint16 {
@@ -273,24 +281,31 @@ func (a *audioManager) decodeAudioId(fileId uint32) uint16 {
 }
 
 func (a *audioManager) addAudioReceiver(fileId uint16, wrq WriteReq) {
-	a.audioReceiver[fileId] = slices.DeleteFunc(a.audioReceiver[fileId], func(w WriteReq) bool {
-		return w.UUID == wrq.UUID
-	})
-	a.audioReceiver[fileId] = append(a.audioReceiver[fileId], wrq)
+	receivers, _ := a.audioReceiver.LoadOrStore(fileId, &sync.Map{})
+	receivers.(*sync.Map).Store(wrq.UUID, wrq)
 }
 
 func (a *audioManager) deleteAudioReceiver(fileId uint16, UUID string) {
-	a.lock.Lock()
-	defer a.lock.Unlock()
-	a.audioReceiver[fileId] = slices.DeleteFunc(a.audioReceiver[fileId], func(w WriteReq) bool {
-		return w.UUID == UUID
-	})
+	receivers, ok := a.audioReceiver.Load(fileId)
+	if !ok {
+		return
+	}
+	receivers.(*sync.Map).Delete(UUID)
 }
 
 func (a *audioManager) cleanupAudioResource(fileId uint16) bool {
-	if len(a.audioReceiver[fileId]) == 0 {
-		delete(a.audioReceiver, fileId)
-		delete(a.audioMap, fileId)
+	receivers, ok := a.audioReceiver.Load(fileId)
+	if !ok {
+		return false
+	}
+	empty := true
+	receivers.(*sync.Map).Range(func(k, v interface{}) bool {
+		empty = false
+		return false
+	})
+	if empty {
+		a.audioReceiver.Delete(fileId)
+		a.audioMap.Delete(fileId)
 		return true
 	}
 	return false
@@ -609,7 +624,7 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 			c.FileMessages <- wrq
 		case OpEndAudioCall:
 			c.deleteAudioReceiver(audioId, wrq.UUID)
-			cancel := c.audioMap[audioId].UUID == wrq.UUID
+			cancel := c.isAudioMaker(audioId, wrq.UUID)
 			cleanup := c.cleanupAudioResource(audioId)
 			if cancel {
 				wrq.FileId = 0
