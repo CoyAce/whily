@@ -180,13 +180,41 @@ func writeTo(filePath string, data []Data) {
 }
 
 type fileContent struct {
-	fileId  uint32
-	content io.ReadSeekCloser
-	rt      RangeTracker
+	fileId     uint32
+	processing bool
+	content    io.ReadSeekCloser
+	reading    RangeTracker
+	pending    RangeTracker
+	lock       sync.Mutex
+}
+
+func (f *fileContent) add(ranges []Range) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	if f.reading.isCompleted() {
+		f.reading.Set(ranges)
+	} else {
+		tracker := RangeTracker{ranges: ranges}
+		tracker.Exclude(f.reading.ranges)
+		f.pending.Merge(tracker)
+	}
+}
+
+func (f *fileContent) remove(rg Range) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	f.reading.Add(rg)
+}
+
+func (f *fileContent) swap() {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	f.reading = f.pending
+	f.pending = RangeTracker{}
 }
 
 type fileReader struct {
-	nck      chan Nck                // packets request
+	req      chan Nck                // packets request
 	contents map[uint32]*fileContent // fileId -> *fileContent
 	send     func(data Data) error   // send one data packet
 }
@@ -194,18 +222,54 @@ type fileReader struct {
 func (f *fileReader) process() {
 	for {
 		select {
-		case n := <-f.nck:
-			go f.read(n)
+		case n := <-f.req:
+			if f.contents[n.FileId] == nil {
+				continue
+			}
+			f.contents[n.FileId].add(n.ranges)
+			if !f.isProcessing(n.FileId) {
+				go f.read(n.FileId)
+			}
 		}
 	}
 }
 
-func (f *fileReader) read(n Nck) {
-	content := f.contents[n.FileId]
-	if content == nil {
+func (f *fileReader) read(id uint32) {
+	content := f.contents[id]
+	if content == nil || len(content.reading.ranges) == 0 {
 		return
 	}
+	content.processing = true
+LOOP:
+	reading := make([]Range, len(content.reading.ranges))
+	copy(reading, content.reading.ranges)
+	for _, rg := range reading {
+		for i := rg.start; i <= rg.end; i++ {
+			pos := (i - 1) * BlockSize
+			_, err := content.content.Seek(int64(pos), 0)
+			if err != nil {
+				log.Printf("Seek failed: %v", err)
+			}
+			d := Data{FileId: content.fileId, Block: i - 1, Payload: content.content}
+			err = f.send(d)
+			if err != nil {
+				log.Printf("Send failed: %v", err)
+			}
+			if i%50 == 0 {
+				content.remove(Range{rg.start, i})
+			}
+		}
+		content.remove(rg)
+	}
+	if !content.pending.isCompleted() {
+		content.swap()
+		goto LOOP
+	}
+	content.processing = false
+}
 
+func (f *fileReader) isProcessing(id uint32) bool {
+	return f.contents[id].processing
 }
 
 func (f *fileReader) isPull(fileId uint32) bool {
@@ -287,7 +351,7 @@ func newFileMetaInfo(
 ) fileManager {
 	return fileManager{
 		fileReader: &fileReader{
-			nck:      make(chan Nck),
+			req:      make(chan Nck),
 			send:     send,
 			contents: make(map[uint32]*fileContent),
 		},
@@ -762,6 +826,7 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 		}
 	case nck.Unmarshal(buf) == nil:
 		if c.fileReader.isPull(nck.FileId) {
+			c.req <- nck
 			return
 		}
 		cb := c.loadCache(nck.FileId)

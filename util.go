@@ -174,6 +174,24 @@ type RangeTracker struct {
 	ranges      []Range
 }
 
+func (r *RangeTracker) Set(ranges []Range) {
+	r.latestBlock = ranges[len(ranges)-1].end + 1
+	r.ranges = ranges
+}
+
+func (r *RangeTracker) Merge(x RangeTracker) {
+	x.Exclude(r.ranges)
+	for _, rng := range x.ranges {
+		r.add(rng)
+	}
+}
+
+func (r *RangeTracker) Exclude(ranges []Range) {
+	for _, rng := range ranges {
+		r.remove(rng)
+	}
+}
+
 func (r *RangeTracker) Add(rg Range) {
 	if rg.start < r.nextBlock() {
 		// 考虑补帧

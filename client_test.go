@@ -5,6 +5,48 @@ import (
 	"testing"
 )
 
+func TestFileContentRangeMergeAndExclude(t *testing.T) {
+	fc := fileContent{}
+	fc.add([]Range{{50, 100}})
+	if !fc.pending.isCompleted() {
+		t.Errorf("pending should have been completed")
+	}
+	fc.add([]Range{{50, 100}})
+	if len(fc.reading.ranges) > 1 || len(fc.reading.ranges) == 0 {
+		t.Errorf("ranges should have been excluded")
+	}
+	fc.add([]Range{{60, 80}})
+	if len(fc.reading.ranges) > 1 || len(fc.reading.ranges) > 1 {
+		t.Errorf("ranges should have been excluded")
+	}
+	fc.add([]Range{{80, 120}})
+	expected := []Range{{101, 120}}
+	if !reflect.DeepEqual(expected, fc.pending.ranges) {
+		t.Errorf("expected: %v, got: %v", expected, fc.pending.ranges)
+	}
+	fc.add([]Range{{80, 120}})
+	if !reflect.DeepEqual(expected, fc.pending.ranges) {
+		t.Errorf("expected: %v, got: %v", expected, fc.pending.ranges)
+	}
+	fc.add([]Range{{1, 120}})
+	expected = []Range{{101, 120}, {1, 49}}
+	if !reflect.DeepEqual(expected, fc.pending.ranges) {
+		t.Errorf("expected: %v, got: %v", expected, fc.pending.ranges)
+	}
+	fc.swap()
+	if !reflect.DeepEqual(expected, fc.reading.ranges) {
+		t.Errorf("expected: %v, got: %v", expected, fc.reading.ranges)
+	}
+	fc.add([]Range{{1, 120}})
+	if !reflect.DeepEqual(expected, fc.reading.ranges) {
+		t.Errorf("expected: %v, got: %v", expected, fc.reading.ranges)
+	}
+	expected = []Range{{50, 100}}
+	if !reflect.DeepEqual(expected, fc.pending.ranges) {
+		t.Errorf("expected: %v, got: %v", expected, fc.pending.ranges)
+	}
+}
+
 func TestRange(t *testing.T) {
 	rt := RangeTracker{}
 	rt.Add(Range{1, 20})

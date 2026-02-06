@@ -3,10 +3,13 @@ package wi
 import (
 	"bytes"
 	"encoding/hex"
+	"io"
 	"math/rand"
 	"net"
+	"os"
 	"reflect"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -110,12 +113,27 @@ func TestListenPacketUDP(t *testing.T) {
 	}
 }
 
+type byteReadSeekCloser struct {
+	*bytes.Reader
+}
+
+func (b *byteReadSeekCloser) Close() error {
+	b.Reader = nil
+	return nil
+}
+
+func BytesToReadSeekCloser(data []byte) io.ReadSeekCloser {
+	return &byteReadSeekCloser{
+		Reader: bytes.NewReader(data),
+	}
+}
+
 func TestPubSub(t *testing.T) {
-	_, serverAddr := setUpServer(t)
+	s, serverAddr := setUpServer(t)
 	pub := newClient(serverAddr, "pub")
 	sub := newClient(serverAddr, "sub")
 	other := newClient(serverAddr, "other")
-	_ = pub.PublishFile("test.txt", 1, 1)
+	_ = pub.PublishFile("test.txt", 5, 1)
 	wrq := <-sub.FileMessages
 	if wrq.FileId != 1 {
 		t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
@@ -134,6 +152,40 @@ func TestPubSub(t *testing.T) {
 	}
 	if rrq.Subscriber != "sub" {
 		t.Errorf("expected subscriber \"sub\"; actual subscriber %q", rrq.Subscriber)
+	}
+	_ = pub.PublishContent("test.txt", 5, 1, BytesToReadSeekCloser([]byte("hello")))
+	wrq = <-sub.FileMessages
+	if wrq.FileId != 1 {
+		t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
+	}
+	if wrq.Code != OpContent {
+		t.Errorf("expected op content %d; actual op content %d", OpContent, wrq.Code)
+	}
+	f, err := os.Open("./test/pub/test.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(text) != "hello" {
+		t.Errorf("expected \"hello\"; actual %q", string(text))
+	}
+	_ = sub.UnsubscribeFile(1, "pub")
+	subs, ok := s.pubMap.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
+	if !ok {
+		t.Errorf("expected pub to have file id %d", wrq.FileId)
+	}
+	found := false
+	subs.(*sync.Map).Range(func(k, v interface{}) bool {
+		if k.(string) == "sub" {
+			found = true
+		}
+		return true
+	})
+	if found {
+		t.Errorf("sub should be removed")
 	}
 }
 
@@ -163,7 +215,7 @@ func TestUnknownUser(t *testing.T) {
 }
 
 func newClient(serverAddr string, UUID string) *Client {
-	client := Client{ServerAddr: serverAddr, Status: make(chan struct{}), UUID: UUID, Sign: "default"}
+	client := Client{DataDir: "./test", ServerAddr: serverAddr, Status: make(chan struct{}), UUID: UUID, Sign: "default"}
 	go func() {
 		client.ListenAndServe("127.0.0.1:")
 	}()

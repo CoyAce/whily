@@ -137,7 +137,7 @@ func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
 		return
 	}
 	subs.(*sync.Map).Range(func(k, v interface{}) bool {
-		go s.connectAndDispatch(k.(string), pkt)
+		go s.connectAndDispatch(s.findAddrByUUID(k.(string)), pkt)
 		return true
 	})
 }
