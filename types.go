@@ -32,6 +32,7 @@ const (
 	OpEndAudioCall
 	OpPublish
 	OpSubscribe
+	OpUnsubscribe
 )
 
 var wrqSet = map[OpCode]bool{
@@ -47,8 +48,9 @@ var wrqSet = map[OpCode]bool{
 }
 
 var rrqSet = map[OpCode]bool{
-	OpRRQ:       true,
-	OpSubscribe: true,
+	OpRRQ:         true,
+	OpSubscribe:   true,
+	OpUnsubscribe: true,
 }
 
 type Req interface {
@@ -122,6 +124,11 @@ func (r *ReadReq) Unmarshal(p []byte) error {
 	}
 
 	return nil
+}
+
+type FilePair struct {
+	FileId uint32
+	UUID   string
 }
 
 type WriteReq struct {

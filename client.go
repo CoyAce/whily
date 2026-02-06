@@ -409,6 +409,10 @@ func (c *Client) SubscribeFile(id uint32, sender string) error {
 	return c.send(&ReadReq{Code: OpSubscribe, FileId: id, Publisher: sender, Subscriber: c.FullID()})
 }
 
+func (c *Client) UnsubscribeFile(id uint32, sender string) error {
+	return c.send(&ReadReq{Code: OpUnsubscribe, FileId: id, Publisher: sender, Subscriber: c.FullID()})
+}
+
 func (c *Client) SendFile(reader io.Reader, code OpCode,
 	filename string, size uint64, duration uint64) error {
 	conn, err := net.Dial("udp", c.ServerAddr)

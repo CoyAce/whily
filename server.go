@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log"
 	"net"
-	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -13,10 +12,10 @@ import (
 type Server struct {
 	Retries uint8         // the number of times to retry a failed transmission
 	Timeout time.Duration // the duration to wait for an acknowledgement
-	fileMap sync.Map
-	pushBuf []WriteReq
-	addrMap sync.Map
-	uuidMap sync.Map
+	fileMap sync.Map      // fileId -> wrq
+	pubMap  sync.Map      // published files, FilePair -> *sync.Map
+	addrMap sync.Map      // addr -> sign
+	uuidMap sync.Map      // uuid -> addr
 	audioManager
 }
 
@@ -94,7 +93,7 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 			s.deleteAudioReceiver(audioId, wrq.UUID)
 			s.cleanupAudioResource(audioId)
 		case OpPublish:
-			s.pushBuf = append(s.pushBuf, wrq)
+			s.pubMap.Store(FilePair{FileId: wrq.FileId, UUID: wrq.UUID}, &sync.Map{})
 		default:
 			s.addFile(wrq)
 		}
@@ -102,7 +101,9 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 	case rrq.Unmarshal(pkt) == nil:
 		switch rrq.Code {
 		case OpSubscribe:
-			s.handleSub(conn, pkt, rrq)
+			go s.handleSub(conn, pkt, rrq)
+		case OpUnsubscribe:
+			go s.deleteSub(rrq)
 		default:
 		}
 		s.ack(conn, addr, 0)
@@ -118,17 +119,25 @@ func (s *Server) reject(conn net.PacketConn, addr net.Addr) {
 }
 
 func (s *Server) handleSub(conn net.PacketConn, pkt []byte, rrq ReadReq) {
-	i := slices.IndexFunc(s.pushBuf, func(x WriteReq) bool {
-		return x.FileId == rrq.FileId && x.UUID == rrq.Publisher
-	})
-	found := i != -1
-	if found {
+	pair := FilePair{FileId: rrq.FileId, UUID: rrq.Publisher}
+	subs, ok := s.pubMap.Load(pair)
+	if ok {
 		_, target := s.findTarget(rrq.Publisher)
 		_, err := conn.WriteTo(pkt, target)
 		if err != nil {
 			log.Printf("Send rrq to [%s} failed: %v", rrq.Publisher, err)
 		}
+		subs.(*sync.Map).Store(rrq, true)
 	}
+}
+
+func (s *Server) deleteSub(rrq ReadReq) {
+	subs, ok := s.pubMap.Load(FilePair{FileId: rrq.FileId, UUID: rrq.Publisher})
+	if !ok {
+		return
+	}
+	rrq.Code = OpSubscribe
+	subs.(*sync.Map).Delete(rrq)
 }
 
 func (s *Server) handleNck(conn net.PacketConn, pkt []byte, nck Nck) {
