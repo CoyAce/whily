@@ -46,7 +46,7 @@ func Mkdir(dir string) {
 		return
 	}
 	// 使用 MkdirAll 确保目录存在
-	err := os.MkdirAll(dir, 0755)
+	err := os.MkdirAll(dir, 0770)
 	if err != nil {
 		log.Printf("Error creating directory: %v", err)
 	}

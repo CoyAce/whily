@@ -205,7 +205,7 @@ func (f *fileWriter) isFile(fileId uint32) bool {
 func writeTo(filePath string, data []Data) {
 	// os.O_CREATE: 如果文件不存在，则创建文件
 	// os.O_WRONLY: 以只写模式打开文件
-	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		log.Printf("error opening file: %v", err)
 	}
