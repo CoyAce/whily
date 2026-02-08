@@ -118,7 +118,8 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		default:
 		}
 	case nck.Unmarshal(pkt) == nil:
-		s.handleNck(conn, pkt, nck)
+		s.ack(conn, addr, 0)
+		s.handleNck(pkt, nck)
 	}
 }
 
@@ -182,13 +183,9 @@ func (s *Server) reject(conn net.PacketConn, addr net.Addr) {
 	_, _ = conn.WriteTo(p, addr)
 }
 
-func (s *Server) handleNck(conn net.PacketConn, pkt []byte, nck Nck) {
+func (s *Server) handleNck(pkt []byte, nck Nck) {
 	sign := s.findSignByFileId(nck.FileId)
-	target, addr := s.findTarget(sign.UUID)
-	_, err := conn.WriteTo(pkt, addr)
-	if err != nil {
-		log.Printf("Send nck to [%s] failed: %v", target, err)
-	}
+	go s.connectAndDispatch(s.findAddrByUUID(sign.UUID), pkt)
 }
 
 func (s *Server) findTarget(UUID string) (string, *net.UDPAddr) {

@@ -23,7 +23,6 @@ type file struct {
 	counter  int
 	createAt time.Time
 	updateAt time.Time
-	timer    *time.Timer
 	rt       *RangeTracker
 	*updater
 }
@@ -33,7 +32,6 @@ type updater struct {
 }
 
 type fileWriter struct {
-	fileId       chan uint32         // finished file id
 	wrq          chan WriteReq       // file request
 	fileData     chan Data           // file data
 	dataDir      string              // files save in dataDir
@@ -46,12 +44,13 @@ type fileWriter struct {
 func (f *fileWriter) loop() {
 	for {
 		select {
-		// last block received, complete file transfer
-		case id := <-f.fileId:
-			// 这里可能执行多次
-			f.tryComplete(id)
 		case req := <-f.wrq:
-			f.init(req)
+			if req.Code == OpReady && f.isFile(req.FileId) {
+				log.Printf("OpReady received, try complete")
+				f.tryComplete(req.FileId)
+			} else {
+				f.init(req)
+			}
 		case data := <-f.fileData:
 			if !f.isFile(data.FileId) {
 				continue
@@ -70,9 +69,6 @@ func (f *fileWriter) tryWrite(data Data) {
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
 		if fd.elapsed1Second() {
 			fd.updateAndReset()
-		}
-		if !f.isPull(data.FileId) {
-			f.tryNck(*fd)
 		}
 	}
 }
@@ -181,23 +177,11 @@ func (f *fileWriter) tryComplete(id uint32) {
 		f.clean(id)
 		f.fileMessages <- req
 	} else {
-		f.tryCompleteIn1Second(fd)
+		f.nck(*fd)
 		if fd.elapsed1Second() {
-			if fd.noDataReceived() {
-				f.nck(*fd)
-			}
 			fd.updateAndReset()
 		}
 	}
-}
-
-func (f *fileWriter) tryCompleteIn1Second(fd *file) {
-	if fd.timer != nil {
-		fd.timer.Stop()
-	}
-	fd.timer = time.AfterFunc(1*time.Second, func() {
-		f.tryComplete(fd.req.FileId)
-	})
 }
 
 func (f *fileWriter) flush(fd *file, filePath string) {
@@ -296,7 +280,8 @@ func (f *fileContent) unsetProcessing() {
 }
 
 type fileReader struct {
-	req       chan Nck                // packets request
+	req       chan Nck // packets request
+	opReady   func(id uint32) error
 	contents  map[uint32]*fileContent // fileId -> *fileContent
 	writeOnce func(data Data) error   // send single data packet
 }
@@ -346,6 +331,10 @@ LOOP:
 		goto LOOP
 	}
 	c.unsetProcessing()
+	err := f.opReady(id)
+	if err != nil {
+		log.Printf("Ready failed: %v", err)
+	}
 }
 
 func (f *fileReader) isPull(fileId uint32) bool {
@@ -435,19 +424,20 @@ func (f *fileManager) loadCache(id uint32) *CircularBuffer {
 func newFileMetaInfo(
 	externalDir string,
 	nck func(f file),
+	opReady func(id uint32) error,
 	writeOnce func(d Data) error,
 	fileMessages chan<- WriteReq,
 ) fileManager {
 	return fileManager{
 		fileReader: &fileReader{
 			req:       make(chan Nck),
+			opReady:   opReady,
 			writeOnce: writeOnce,
 			contents:  make(map[uint32]*fileContent),
 		},
 		fileWriter: &fileWriter{
 			wrq:          make(chan WriteReq),
 			fileData:     make(chan Data),
-			fileId:       make(chan uint32),
 			dataDir:      externalDir,
 			fileMessages: fileMessages,
 			files:        make(map[uint32]*file),
@@ -619,13 +609,13 @@ func (c *Client) newAudioReq(code OpCode, fileId uint32) *WriteReq {
 	return &WriteReq{Code: code, FileId: fileId, UUID: c.FullID()}
 }
 
-func (c *Client) send(wrq Req) error {
+func (c *Client) send(req Req) error {
 	conn, err := net.Dial("udp", c.ServerAddr)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	pkt, err := wrq.Marshal()
+	pkt, err := req.Marshal()
 	if err != nil {
 		return err
 	}
@@ -660,36 +650,26 @@ func (c *Client) UnsubscribeFile(id uint32, sender string) error {
 
 func (c *Client) SendFile(reader io.Reader, code OpCode,
 	filename string, size uint64, duration uint64) error {
-	conn, err := net.Dial("udp", c.ServerAddr)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-
 	hash := Hash(unsafe.Pointer(&reader))
 	log.Printf("file id: %v", hash)
 
 	wrq := WriteReq{Code: code, FileId: hash, UUID: c.FullID(),
 		Filename: filename, Size: size, Duration: duration}
-	pkt, err := wrq.Marshal()
-	if err != nil {
-		return err
-	}
-	_, err = c.sendPacket(conn, pkt, 0)
+	err := c.send(&wrq)
 	if err != nil {
 		return err
 	}
 	c.initCache(wrq.FileId)
 
 	data := Data{FileId: wrq.FileId, Payload: reader}
-	err = c.sendData(conn, data)
+	err = c.sendData(data)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (c *Client) sendData(conn net.Conn, data Data) error {
+func (c *Client) sendData(data Data) error {
 	cb := c.loadCache(data.FileId)
 	for n := DatagramSize; n == DatagramSize; {
 		pkt, err := data.Marshal()
@@ -697,18 +677,22 @@ func (c *Client) sendData(conn net.Conn, data Data) error {
 			return err
 		}
 		cb.Write(Packet{Block: data.Block, Data: pkt})
-		isLastPacket := len(pkt) != DatagramSize
-		if isLastPacket {
-			n, err = c.sendPacket(conn, pkt, data.Block)
-		} else {
-			n, err = c.conn.WriteTo(pkt, c.SAddr)
-		}
+		n, err = c.conn.WriteTo(pkt, c.SAddr)
 		if err != nil {
 			return err
 		}
 	}
+	err := c.opReady(data.FileId)
+	if err != nil {
+		return err
+	}
 	c.cleanCacheIn20Seconds(data.FileId)
 	return nil
+}
+
+func (c *Client) opReady(id uint32) error {
+	log.Printf("send OpReady")
+	return c.send(&WriteReq{Code: OpReady, FileId: id, UUID: c.FullID()})
 }
 
 func (c *Client) writeOnce(data Data) error {
@@ -716,22 +700,9 @@ func (c *Client) writeOnce(data Data) error {
 	if err != nil {
 		return err
 	}
-	isLastPacket := len(pkt) != DatagramSize
-	if isLastPacket {
-		conn, err := net.Dial("udp", c.ServerAddr)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = conn.Close() }()
-		_, err = c.sendPacket(conn, pkt, data.Block)
-		if err != nil {
-			return err
-		}
-	} else {
-		_, err = c.conn.WriteTo(pkt, c.SAddr)
-		if err != nil {
-			return err
-		}
+	_, err = c.conn.WriteTo(pkt, c.SAddr)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -797,7 +768,7 @@ func (c *Client) ListenAndServe(addr string) {
 func (c *Client) init() {
 	c.messages = newMessages()
 	c.audioManager = newAudioMetaInfo()
-	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.writeOnce, c.FileMessages)
+	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.opReady, c.writeOnce, c.FileMessages)
 }
 
 func (c *Client) SendSign() {
@@ -891,17 +862,20 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 			// content ready
 			fallthrough
 		default:
-			c.addFile(wrq)
+			c.wrq <- wrq
 		}
 	case data.Unmarshal(buf) == nil:
 		if c.isAudio(data.FileId) {
-			c.AudioData <- data
-			return
-		}
-		if c.isFile(data.FileId) {
-			c.handleFileData(conn, addr, data, len(buf))
+			select {
+			case c.AudioData <- data:
+			default:
+			}
+		} else if c.isFile(data.FileId) {
+			c.fileData <- data
 		}
 	case nck.Unmarshal(buf) == nil:
+		c.ack(conn, addr, 0)
+		log.Printf("nck received")
 		if c.fileReader.isPull(nck.FileId) {
 			c.req <- nck
 			return
@@ -914,24 +888,12 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 		for _, pkt := range packets {
 			_, _ = c.conn.WriteTo(pkt.Data, c.SAddr)
 		}
+		_ = c.opReady(nck.FileId)
 	case ec.Unmarshal(buf) == nil:
 		if ec == ErrUnknownUser {
 			c.SendSign()
 		}
 	}
-}
-
-func (c *Client) handleFileData(conn net.PacketConn, addr net.Addr, data Data, n int) {
-	c.fileData <- data
-	if n < DatagramSize {
-		c.ack(conn, addr, data.Block)
-		c.fileId <- data.FileId
-		log.Printf("file id: [%d] received", data.FileId)
-	}
-}
-
-func (c *Client) addFile(wrq WriteReq) {
-	c.wrq <- wrq
 }
 
 func (c *Client) ack(conn net.PacketConn, addr net.Addr, block uint32) {
@@ -945,10 +907,9 @@ func (c *Client) ack(conn net.PacketConn, addr net.Addr, block uint32) {
 
 func (c *Client) nck(f file) {
 	nck := Nck{FileId: f.req.FileId, ranges: f.rt.GetRanges()}
-	pkt, _ := nck.Marshal()
-	_, err := c.conn.WriteTo(pkt, c.SAddr)
+	err := c.send(&nck)
 	if err != nil {
-		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
+		log.Printf("send nck failed: %v", err)
 	}
 	log.Printf("request missing packets %v", nck)
 }

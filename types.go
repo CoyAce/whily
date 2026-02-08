@@ -34,6 +34,7 @@ const (
 	OpSubscribe
 	OpUnsubscribe
 	OpContent
+	OpReady
 )
 
 var wrqSet = map[OpCode]bool{
@@ -47,6 +48,7 @@ var wrqSet = map[OpCode]bool{
 	OpEndAudioCall:    true,
 	OpPublish:         true,
 	OpContent:         true,
+	OpReady:           true,
 }
 
 var rrqSet = map[OpCode]bool{

@@ -57,7 +57,7 @@ func TestListenPacketUDP(t *testing.T) {
 	clientAMsg := SignedMessage{Sign: clientASign, Payload: []byte(textA)}
 	clientAMsgPkt, err := clientAMsg.Marshal()
 
-	_, serverAddr := setUpServer(t)
+	s, serverAddr := setUpServer(t)
 	client, err := setUpClient(t)
 	defer func() { _ = client.Close() }()
 
@@ -116,6 +116,18 @@ func TestListenPacketUDP(t *testing.T) {
 	if !bytes.Equal(msgAckBytes, buf[:n]) {
 		t.Errorf("expected reply %q; actual reply %q", signAckBytes, buf[:n])
 	}
+
+	s.addFile(WriteReq{FileId: 1, UUID: uuidA})
+	// client send nck, server should reply ack
+	nck := Nck{FileId: 1, ranges: []Range{{1, 1}}}
+	nckPkt, _ := nck.Marshal()
+	_, err = client.WriteTo(nckPkt, sAddr)
+	// read ack
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	n, _, err = client.ReadFrom(buf)
+	if !bytes.Equal(msgAckBytes, buf[:n]) {
+		t.Errorf("expected reply %q; actual reply %q", signAckBytes, buf[:n])
+	}
 }
 
 type byteReadSeekCloser struct {
@@ -150,10 +162,8 @@ func TestPubSub(t *testing.T) {
 	if !reflect.DeepEqual(wrq, q) {
 		t.Errorf("expected file message %v; actual file message %v", wrq, q)
 	}
-	_ = sub.SubscribeFile(1, "pub", func(p int) {
-		log.Printf("progress %d", p)
-	}, func(s int) {
-		log.Printf("speed %d", s)
+	_ = sub.SubscribeFile(1, "pub", func(p int, s int) {
+		log.Printf("progress %d, speed %d", p, s)
 	})
 	rrq := <-pub.SubMessages
 	if rrq.FileId != 1 {
