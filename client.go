@@ -69,7 +69,7 @@ func (f *fileWriter) tryWrite(data Data) {
 	if f.received256kb(fd) {
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
 		if fd.elapsed1Second() {
-			fd.updateMetrics()
+			fd.updateAndReset()
 		}
 		if !f.isPull(data.FileId) {
 			f.tryNck(*fd)
@@ -81,11 +81,14 @@ func (f *file) elapsed1Second() bool {
 	return time.Since(f.updateAt) >= 1*time.Second
 }
 
-func (f *file) updateMetrics() {
-	if f.updater == nil {
-		return
+func (f *file) noDataReceived() bool {
+	return f.counter == 0
+}
+
+func (f *file) updateAndReset() {
+	if f.updater != nil {
+		f.update()
 	}
-	f.update()
 	f.reset()
 }
 
@@ -174,14 +177,16 @@ func (f *fileWriter) tryComplete(id uint32) {
 	req := fd.req
 	f.flush(fd, f.getPath(req.UUID, req.Filename))
 	if fd.rt.isCompleted() {
-		fd.updateMetrics()
+		fd.updateAndReset()
 		f.clean(id)
 		f.fileMessages <- req
 	} else {
-		f.nck(*fd)
 		f.tryCompleteIn1Second(fd)
 		if fd.elapsed1Second() {
-			fd.updateMetrics()
+			if fd.noDataReceived() {
+				f.nck(*fd)
+			}
+			fd.updateAndReset()
 		}
 	}
 }
@@ -319,12 +324,12 @@ LOOP:
 	reading := make([]Range, len(c.reading.ranges))
 	copy(reading, c.reading.ranges)
 	for _, rg := range reading {
+		pos := (rg.start - 1) * BlockSize
+		_, err := c.content.Seek(int64(pos), 0)
+		if err != nil {
+			log.Printf("Seek failed: %v", err)
+		}
 		for i := rg.start; i <= rg.end; i++ {
-			pos := (i - 1) * BlockSize
-			_, err := c.content.Seek(int64(pos), 0)
-			if err != nil {
-				log.Printf("Seek failed: %v", err)
-			}
 			d := Data{FileId: c.fileId, Block: i - 1, Payload: c.content}
 			err = f.writeOnce(d)
 			if err != nil {
@@ -386,7 +391,7 @@ type messages struct {
 
 func newMessages() messages {
 	return messages{
-		Retries:        3,
+		Retries:        9,
 		Timeout:        6 * time.Second,
 		SignedMessages: make(chan SignedMessage, 100),
 		FileMessages:   make(chan WriteReq, 20),

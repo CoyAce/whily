@@ -269,7 +269,7 @@ func (s *Server) addFile(wrq WriteReq) {
 
 func (s *Server) init() {
 	if s.Retries == 0 {
-		s.Retries = 3
+		s.Retries = 9
 	}
 
 	if s.Timeout == 0 {
