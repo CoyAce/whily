@@ -99,7 +99,11 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 				s.cleanup(audioId)
 			}
 		case OpPublish:
-			s.pubMap.Store(FilePair{FileId: wrq.FileId, UUID: wrq.UUID}, &sync.Map{})
+			pair := FilePair{FileId: wrq.FileId, UUID: wrq.UUID}
+			_, ok := s.pubMap.Load(pair)
+			if !ok {
+				s.pubMap.Store(pair, &sync.Map{})
+			}
 		case OpContent:
 			s.addFile(wrq)
 			s.dispatchToSubscribers(wrq, pkt)
@@ -163,10 +167,12 @@ func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
 func (s *Server) dispatchToPublisher(pkt []byte, rrq ReadReq) {
 	pair := FilePair{FileId: rrq.FileId, UUID: rrq.Publisher}
 	subs, ok := s.pubMap.Load(pair)
-	if ok {
-		go s.connectAndDispatch(s.findAddrByUUID(rrq.Publisher), pkt)
-		subs.(*sync.Map).Store(rrq.Subscriber, rrq)
+	if !ok {
+		subs = &sync.Map{}
+		s.pubMap.Store(pair, subs)
 	}
+	subs.(*sync.Map).Store(rrq.Subscriber, rrq)
+	go s.connectAndDispatch(s.findAddrByUUID(rrq.Publisher), pkt)
 }
 
 func (s *Server) deleteSub(rrq ReadReq) {
