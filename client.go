@@ -710,14 +710,14 @@ func (c *Client) writeOnce(data Data) error {
 func (c *Client) SendText(text string) error {
 	conn, err := net.Dial("udp", c.ServerAddr)
 	if err != nil {
-		log.Printf("[%s] dial failed: %v", c.ServerAddr, err)
+		return err
 	}
 	defer func() { _ = conn.Close() }()
 
 	msg := SignedMessage{Sign: Sign{c.Sign, c.FullID()}, Payload: []byte(text)}
 	pkt, err := msg.Marshal()
 	if err != nil {
-		log.Printf("[%s] marshal failed: %v", text, err)
+		return err
 	}
 
 	c.MessageCounter++

@@ -342,7 +342,10 @@ func (s *Server) connectAndDispatch(addr string, bytes []byte) {
 	conn, err := net.Dial("udp", addr)
 	if err != nil {
 		log.Printf("[%s] dial failed: %v", addr, err)
-		s.removeByAddr(addr)
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			s.removeByAddr(addr)
+		}
+		return
 	}
 	defer func() {
 		if conn != nil {
