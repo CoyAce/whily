@@ -45,9 +45,12 @@ func (f *fileWriter) loop() {
 	for {
 		select {
 		case req := <-f.wrq:
-			if req.Code == OpReady && f.isFile(req.FileId) {
+			if req.Code == OpReady {
 				log.Printf("OpReady received, try complete")
 				f.tryComplete(req.FileId)
+				if !f.isFile(req.FileId) {
+					continue
+				}
 			} else {
 				f.init(req)
 			}
@@ -208,7 +211,7 @@ func writeTo(filePath string, data []Data) {
 	// os.O_WRONLY: 以只写模式打开文件
 	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
-		log.Printf("error opening file: %v", err)
+		log.Printf("open file failed: %v", err)
 	}
 	defer f.Close()
 
